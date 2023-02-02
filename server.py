@@ -1,15 +1,28 @@
-#!/usr/bin/env python
+#!/global/common/shared/das/python3/bin/python
+
+from sanic import Blueprint
 
 from sanic import Sanic
 from sanic.response import json
 from runner import Runner
 from queue import Empty
 import time
-
+import os
 import uuid
+import socket
+import signal, os
+
+socket_file = os.environ.get("PROXY_SOCKET")
+
+bp = Blueprint('my_blueprint')
+
+@bp.listener('after_server_stop')
+async def close_connection(app, loop):
+    os.unlink(socket_file)
 
 
-app = Sanic("App Name")
+app = Sanic("App Name", configure_logging=False)
+app.blueprint(bp)
 
 runner = Runner()
 
@@ -17,6 +30,8 @@ procs = dict()
 
 def run(cmd):
     job_id = str(uuid.uuid1())
+    # Strip off a path to avoid a looop
+    cmd[0] = cmd[0].split('/')[-1]
     procs[job_id] = runner.run(cmd)
     return job_id
 
@@ -50,8 +65,21 @@ async def output(request, jid):
   msgs = read_output(jid)
   return json(msgs)
 
+def remove_path():
+    script = os.path.realpath(__file__)
+    sdir = os.path.dirname(script)
+    path = os.environ.get("PATH")
+    if sdir in path:
+        items = path.split(":")
+        for item in items:
+            if sdir in item:
+               items.remove(item)
+        newpath = ':'.join(items)
+        os.environ["PATH"] = newpath
+
 if __name__ == "__main__":
-    import socket
+    # Set the signal handler and a 5-second alarm
+    remove_path()
     sock = socket.socket(socket.AF_UNIX)
-    sock.bind('/tmp/api.sock')
-    app.run(sock=sock)
+    sock.bind(socket_file)
+    app.run(sock=sock, access_log=False)
