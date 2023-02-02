@@ -1,85 +1,59 @@
-#!/global/common/shared/das/python3/bin/python
-
-from sanic import Blueprint
-
-from sanic import Sanic
-from sanic.response import json
-from runner import Runner
-from queue import Empty
-import time
 import os
-import uuid
-import socket
-import signal, os
-
-socket_file = os.environ.get("PROXY_SOCKET")
-
-bp = Blueprint('my_blueprint')
-
-@bp.listener('after_server_stop')
-async def close_connection(app, loop):
-    os.unlink(socket_file)
+from threading import Thread
+from subprocess import Popen, PIPE
+from select import select
+from multiprocessing import Queue
 
 
-app = Sanic("App Name", configure_logging=False)
-app.blueprint(bp)
+class job:
+    def __init__(self, p, q):
+        self.p = p
+        self.q = q
 
-runner = Runner()
+    def p(self):
+        return p
 
-procs = dict()
+    def q(self):
+        return q
 
-def run(cmd):
-    job_id = str(uuid.uuid1())
-    # Strip off a path to avoid a looop
-    cmd[0] = cmd[0].split('/')[-1]
-    procs[job_id] = runner.run(cmd)
-    return job_id
+class Runner:
+    """
+    This class provides the container interface for Docker.
 
-def read_output(job_id):
-    in_q = procs[job_id].q
-    msgs = []
-    try:
-        # Flush the queue
-        while True:
-            msg = in_q.get(block=False)
-            msgs.append(msg)
-    except Empty:
-        pass
-    return {'msgs': msgs}
+    """
 
-  
+    def __init__(self):
+        """
+        Inputs: config dictionary, Job ID, and optional logger
+        """
+        self.procs = []
+        self.threads = []
 
+    def _readio(self, p, q):
+        cont = True
+        last = False
+        while cont:
+            rlist = [p.stdout, p.stderr]
+            x = select(rlist, [], [], 1)[0]
+            for f in x:
+                if f == p.stderr:
+                    error = True
+                else:
+                    error = False
+                line = f.readline().decode('utf-8')
+                if len(line) > 0:
+                    q.put({'msg': 'output', 'line': line, 'error': error})
+            if last:
+                cont = False
+            if p.poll() is not None:
+                last = True
+        q.put({'msg': 'finished', 'exit': p.returncode})
 
-@app.route("/",)
-async def test(request):
-    return json({"hello": "world"})
-
-@app.route("/submit", methods=["POST"])
-def post_json(request):
-  data = request.json
-  jid = run(data['cmd'])
-  return json({ "received": True, "jid": jid})
-
-@app.route("/output/<jid>")
-async def output(request, jid):
-  msgs = read_output(jid)
-  return json(msgs)
-
-def remove_path():
-    script = os.path.realpath(__file__)
-    sdir = os.path.dirname(script)
-    path = os.environ.get("PATH")
-    if sdir in path:
-        items = path.split(":")
-        for item in items:
-            if sdir in item:
-               items.remove(item)
-        newpath = ':'.join(items)
-        os.environ["PATH"] = newpath
-
-if __name__ == "__main__":
-    # Set the signal handler and a 5-second alarm
-    remove_path()
-    sock = socket.socket(socket.AF_UNIX)
-    sock.bind(socket_file)
-    app.run(sock=sock, access_log=False)
+    def run(self, cmd):
+        q = Queue()
+        proc = Popen(cmd, bufsize=0, stdout=PIPE, stderr=PIPE)
+        out = Thread(target=self._readio, args=[proc, q])
+        self.threads.append(out)
+        out.start()
+        self.procs.append(proc)
+        return job(proc, q)
